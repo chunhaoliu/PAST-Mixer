@@ -1,0 +1,26 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite the accompanying manuscript."
+title: "PAST-Mixer: Observable Kinematic-State Mixing for Open-Loop Long-Horizon Ballistic Trajectory Prediction"
+type: software
+authors:
+  - family-names: Liu
+    given-names: Chunhao
+    orcid: "https://orcid.org/0000-0003-2332-8984"
+  - family-names: Wu
+    given-names: Panlong
+    orcid: "https://orcid.org/0000-0002-1177-4250"
+  - family-names: He
+    given-names: Shan
+    orcid: "https://orcid.org/0000-0003-1743-5935"
+  - family-names: Li
+    given-names: Jimin
+    orcid: "https://orcid.org/0009-0008-6955-0381"
+  - family-names: Zhang
+    given-names: Chaojie
+    orcid: "https://orcid.org/0009-0007-7405-0245"
+  - family-names: Pan
+    given-names: Guangyuan
+    orcid: "https://orcid.org/0000-0003-0115-6659"
+repository-code: "https://github.com/chunhaoliu/PAST-Mixer"
+license: MIT
+date-released: 2026-08-12

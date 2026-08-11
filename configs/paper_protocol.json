@@ -1,0 +1,34 @@
+{
+  "task": "ballistic_forecast",
+  "protocol": {
+    "observation_mode": "tracked",
+    "observation_steps": 100,
+    "prediction_steps": 1000,
+    "sample_interval_s": 0.01,
+    "input_shape": ["B", 100, 3],
+    "output_shape": ["B", 1000, 3]
+  },
+  "model": {
+    "name": "PASTMixer",
+    "d_model": 256,
+    "d_ff": 512,
+    "e_layers": 3,
+    "dropout": 0.1,
+    "past_norm_mode": "pre",
+    "past_output_mode": "displacement",
+    "past_state_mode": "kinematics",
+    "past_state_lag": 5
+  },
+  "training": {
+    "seeds": [2021, 2022, 2023],
+    "epochs": 40,
+    "batch_size": 32,
+    "patience": 10,
+    "learning_rate": 0.001,
+    "learning_rate_schedule": "type3",
+    "loss": "physical_composite",
+    "ade_weight": 0.5,
+    "fde_weight": 0.25
+  },
+  "scope": "Controlled representative projectile-class simulation; not field telemetry, exact firing-table reconstruction, or operational deployment."
+}
