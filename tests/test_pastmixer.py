@@ -20,7 +20,7 @@ def config(**overrides):
 def test_model_shape_and_gradient_flow():
     model = Model(config())
     x = torch.randn(4, 10, 3, requires_grad=True)
-    y = model(x)
+    y = model(x, None, None, None)
     assert y.shape == (4, 6, 3)
     y.square().mean().backward()
     assert x.grad is not None
@@ -32,5 +32,5 @@ def test_ablation_switches_change_only_documented_interfaces():
     absolute_model = Model(config(past_output_mode='absolute'))
     no_norm_block = PASTMixerBlock(config(past_norm_mode='none'))
     assert position_model.kinematic_state_encoder[0].in_features == 3
-    assert absolute_model(torch.randn(2, 10, 3)).shape == (2, 6, 3)
+    assert absolute_model(torch.randn(2, 10, 3), None, None, None).shape == (2, 6, 3)
     assert isinstance(no_norm_block.temporal_norm, nn.Identity)

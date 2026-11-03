@@ -131,16 +131,43 @@ def _nvidia_driver_version():
         return None
 
 
-def write_evaluation_artifacts(args, setting, preds, trues, test_evaluation_count=1):
+def masked_trajectory_metrics(preds, trues, mask=None):
+    """Coordinate and displacement metrics over valid future steps.
+
+    With a mask, FDE is taken at each trajectory's last valid step (impact).
+    """
+    error = preds - trues
+    distances = np.linalg.norm(error, axis=-1)
+    if mask is None:
+        mask = np.ones(distances.shape, dtype=bool)
+    mask = np.asarray(mask).astype(bool)
+    valid = mask.sum()
+    squared = (error ** 2)[mask]
+    last = mask.sum(axis=1) - 1
+    return {
+        'sample_count': int(preds.shape[0]),
+        'horizon_steps': int(preds.shape[1]),
+        'masked': bool(not mask.all()),
+        'valid_steps': int(valid),
+        'mae': float(np.abs(error)[mask].mean()),
+        'mse': float(squared.mean()),
+        'rmse': float(np.sqrt(squared.mean())),
+        'ade_m': float(distances[mask].mean()),
+        'fde_m': float(distances[np.arange(len(last)), last].mean()),
+    }
+
+
+def write_evaluation_artifacts(args, setting, preds, trues, test_evaluation_count=1, mask=None):
     """Write arrays, metrics, and manifest exactly once for a run."""
     root = _project_root()
     result_dir = Path(args.results) / setting
     checkpoint_path = Path(args.checkpoints) / setting / 'checkpoint.pth'
     pred_path = result_dir / 'pred.npy'
     true_path = result_dir / 'true.npy'
+    valid_len_path = result_dir / 'valid_len.npy'
     metrics_path = result_dir / 'metrics.json'
     manifest_path = result_dir / 'run_manifest.json'
-    targets = (pred_path, true_path, metrics_path, manifest_path)
+    targets = (pred_path, true_path, valid_len_path, metrics_path, manifest_path)
     existing = [str(path) for path in targets if path.exists()]
     if existing:
         raise FileExistsError('Refusing partial or destructive evaluation write: ' + ', '.join(existing))
@@ -149,20 +176,12 @@ def write_evaluation_artifacts(args, setting, preds, trues, test_evaluation_coun
     trues = np.asarray(trues)
     if preds.shape != trues.shape or preds.ndim != 3:
         raise ValueError(f'Expected matching (N,H,C) arrays, got {preds.shape} and {trues.shape}')
-    error = preds - trues
-    distances = np.linalg.norm(error, axis=-1)
-    metrics = {
-        'sample_count': int(preds.shape[0]),
-        'horizon_steps': int(preds.shape[1]),
-        'mae': float(np.mean(np.abs(error))),
-        'mse': float(np.mean(error ** 2)),
-        'rmse': float(np.sqrt(np.mean(error ** 2))),
-        'ade_m': float(distances.mean()),
-        'fde_m': float(distances[:, -1].mean()),
-    }
+    metrics = masked_trajectory_metrics(preds, trues, mask)
 
     _atomic_numpy_new(pred_path, preds)
     _atomic_numpy_new(true_path, trues)
+    if mask is not None:
+        _atomic_numpy_new(valid_len_path, np.asarray(mask).astype(bool).sum(axis=1).astype(np.int32))
     _atomic_json_new(metrics_path, metrics)
 
     dataset_manifest_path = Path(args.dataset_dir) / 'protocol_manifest.json'

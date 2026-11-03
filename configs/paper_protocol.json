@@ -1,34 +1,148 @@
 {
   "task": "ballistic_forecast",
+  "experiment_matrix": "configs/experiments/main_v3_20261102.py",
   "protocol": {
+    "dataset_dir": "data/protocol_v2",
     "observation_mode": "tracked",
     "observation_steps": 100,
-    "prediction_steps": 1000,
+    "prediction_steps": 2000,
     "sample_interval_s": 0.01,
-    "input_shape": ["B", 100, 3],
-    "output_shape": ["B", 1000, 3]
+    "remaining_time_s": {
+      "distribution": "uniform",
+      "min": 5,
+      "max": 20
+    },
+    "input_shape": [
+      "B",
+      100,
+      3
+    ],
+    "output_shape": [
+      "B",
+      2000,
+      3
+    ],
+    "valid_len": "Number of future samples through impact, inclusive; subsequent samples are masked."
   },
   "model": {
     "name": "PASTMixer",
+    "input_state": "kinematics",
+    "output_mode": "physics_anchor",
+    "anchor_context": "fit",
+    "residual_gate": "none",
     "d_model": 256,
     "d_ff": 512,
     "e_layers": 3,
     "dropout": 0.1,
+    "past_temporal_mode": "simple",
     "past_norm_mode": "pre",
-    "past_output_mode": "displacement",
-    "past_state_mode": "kinematics",
-    "past_state_lag": 5
+    "past_state_lag": 5,
+    "use_physics": 0,
+    "physics_mode": "none"
   },
   "training": {
-    "seeds": [2021, 2022, 2023],
-    "epochs": 40,
+    "seeds": [
+      2021,
+      2022,
+      2023,
+      2024,
+      2025
+    ],
+    "epochs": 80,
     "batch_size": 32,
-    "patience": 10,
+    "patience": 15,
     "learning_rate": 0.001,
+    "optimizer": "Adam",
     "learning_rate_schedule": "type3",
     "loss": "physical_composite",
+    "objective": "masked physical-unit RMSE + 0.5 ADE",
     "ade_weight": 0.5,
-    "fde_weight": 0.25
+    "fde_weight": 0.0,
+    "select_metric": "val_rmse_m",
+    "normalization": "Full training split only; fixed for validation and test."
   },
-  "scope": "Controlled representative projectile-class simulation; not field telemetry, exact firing-table reconstruction, or operational deployment."
+  "tuning": {
+    "seed": 2021,
+    "d_model": [
+      128,
+      256
+    ],
+    "e_layers": [
+      2,
+      3,
+      4
+    ],
+    "learning_rate": [
+      0.001,
+      0.0005
+    ],
+    "selection": "Minimum validation coordinate RMSE in meters; 12 configurations per backbone."
+  },
+  "tuned_baselines": {
+    "Transformer": {
+      "d_model": 128,
+      "d_ff": 256,
+      "e_layers": 3,
+      "learning_rate": 0.0005
+    },
+    "TimeMixer": {
+      "d_model": 128,
+      "d_ff": 256,
+      "e_layers": 2,
+      "learning_rate": 0.001
+    },
+    "TSMixer": {
+      "d_model": 256,
+      "d_ff": 512,
+      "e_layers": 3,
+      "learning_rate": 0.0005
+    },
+    "LSTM": {
+      "d_model": 256,
+      "d_ff": 512,
+      "e_layers": 2,
+      "learning_rate": 0.001
+    },
+    "iTransformer": {
+      "d_model": 128,
+      "d_ff": 256,
+      "e_layers": 3,
+      "learning_rate": 0.001
+    }
+  },
+  "anchor": {
+    "method": "Drag-LS MAP fit",
+    "iterations": 8,
+    "integrator": "RK4",
+    "prior": "Clean training trajectories only; validation selects residual scale.",
+    "prior_trajectories": 1500,
+    "prior_future_steps": 500,
+    "residual_scale_grid_m": [
+      0.25,
+      1,
+      4,
+      16
+    ],
+    "selected_residual_scale_m": 4
+  },
+  "sensor": {
+    "range_std_m": "severity * (3 + 2.5e-4 * range)",
+    "angle_std_deg": "0.04 * severity",
+    "nominal": {
+      "severity": 1.0,
+      "detection_probability": 0.98
+    },
+    "extrapolative": {
+      "severity": 1.6,
+      "detection_probability": 0.9
+    },
+    "radar_site_m": "x~U[-6000,-2500], y~U[-2500,2500], z~U[20,80] per trajectory"
+  },
+  "tracker": {
+    "model": "ca",
+    "process_noise_intensity": 2.0,
+    "initialization": "two-point differencing with consistent covariance",
+    "measurement": "converted range-azimuth-elevation, full Jacobian covariance"
+  },
+  "scope": "Controlled representative projectile-class simulation; not field telemetry, exact firing-table reconstruction, or operational deployment. Benchmark generator and data are not included."
 }
