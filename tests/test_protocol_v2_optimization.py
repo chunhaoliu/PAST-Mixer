@@ -13,6 +13,35 @@ from tools import evaluate_protocol_v2_physics_baselines as physics
 from utils.ballistic_physics import DT, _window_residual, drag_window_trajectory, rk4_step
 
 
+def test_conformal_quantile_and_closed_disk_coverage():
+    from tools.conformal_protocol_v2 import conformal_quantile, region_summary, calibrate
+
+    # n=10: finite-sample ranks are 10 (90%) and 9 (80%), without interpolation.
+    scores = np.array([7., 2., 10., 1., 5., 9., 3., 6., 8., 4.])
+    assert conformal_quantile(scores, 0.1) == 10.
+    assert conformal_quantile(scores, 0.2) == 9.
+    assert np.isinf(conformal_quantile([1., 2.], 0.1))
+    assert region_summary(np.array([0., 1., 2., 3.]), np.array([0., 1., 1., 2.])) == {
+        'n': 4, 'covered': 2, 'coverage': 0.5, 'median_radius_m': 1.}
+    val = {'error': scores, 'spread': np.full(10, 2.), 'correction': np.full(10, 3.)}
+    test = {'error': np.array([9., 10., 11.]), 'spread': np.array([2., 6., 2.]),
+            'correction': np.array([3., 9., 3.]),
+            'meta': {'projectile': ['held'] * 3, 'domain': ['nominal', 'extrapolative', 'nominal']}}
+    result = calibrate(val, test, holdout=True)['variants']
+    assert result['V1']['d_m'] == 2.  # Calibration medians only, unaffected by test.
+    assert result['V2']['d_m'] == 3.
+    for variant in result.values():
+        assert variant['levels']['90']['groups']['overall']['coverage'] == 2 / 3
+    assert result['V1']['levels']['80']['groups']['extrapolative']['median_radius_m'] == 18.
+    assert result['V2']['levels']['80']['groups']['extrapolative']['median_radius_m'] == 18.
+    assert result['V0']['levels']['80']['groups']['extrapolative']['coverage'] == 0.
+    for invalid in ([], [-1.], [np.nan]):
+        with pytest.raises(ValueError):
+            conformal_quantile(invalid, 0.1)
+
+
+
+
 def test_measurement_conversion_covariance_and_sensor_domains():
     from utils.radar_measurement import ANGLE_STD_DEG, polar_to_cartesian, sensor_for_domain
 
@@ -57,8 +86,8 @@ def test_drag_baselines_on_synthetic_measurements():
     np.testing.assert_allclose(filtered, drag_predict(params, 10), atol=2.)
 
 
-@pytest.mark.parametrize('stage,count', [('main', 130), ('abl', 20), ('tune', 72), ('best', 25),
-                                       ('rand', 30), ('win', 36), ('stress', 30)])
+@pytest.mark.parametrize('stage,count', [('main', 130), ('abl', 25), ('tune', 72), ('best', 25),
+                                       ('rand', 30), ('win', 36), ('stress', 30), ('hold', 60)])
 def test_final_objective_matrix_matches_paper_protocol(stage, count, monkeypatch):
     import subprocess
     from run import parse_args
@@ -264,6 +293,117 @@ def test_paired_bootstrap_identical_and_weighted():
         paired_bootstrap(left, {2021: totals}, lengths, 100)
 
 
+def test_paired_impact_bootstrap_crossing_quantiles_and_resampling():
+    from tools.summarize_protocol_v2 import paired_impact_bootstrap
+    from utils.metrics import evaluate, impact_metrics
+
+    true = np.zeros((4, 4, 3))
+    true[:, :, 2] = [4, 2, 0, -2]
+    lengths = np.full(4, 3)
+    left = {}
+    for seed, scale in ((2021, 1), (2022, 2)):
+        pred = true.copy()
+        pred[:, :, 0] = scale * np.array([1., 4., 8., 20.])[:, None] + 2 * np.arange(4)
+        pred[:, :, 2] = [3, 1, -1, -3]
+        left[seed] = impact_metrics(pred, true, lengths)['impact_err_m']
+        # Crossing is halfway between steps 1 and 2, rather than at true impact.
+        np.testing.assert_array_equal(left[seed], scale * np.array([1., 4., 8., 20.]) + 3)
+        assert np.median(left[seed]) == evaluate(pred, true, lengths)['overall']['impact_err_median_m']
+    right = {2021: np.array([10., 1., 6., 30.]), 2022: np.array([3., 20., 1., 12.])}
+    a, b = np.stack(list(left.values())), np.stack(list(right.values()))
+    reductions = (np.mean, np.median, lambda x, axis: np.percentile(x, 90, axis=axis))
+    rng = np.random.default_rng(0)
+    samples = []
+    for _ in range(2000):
+        indices = rng.integers(4, size=4)
+        seeds = rng.integers(2, size=2)
+        samples.append([np.mean([reduce(a[s, indices], axis=0) - reduce(b[s, indices], axis=0)
+                                 for s in seeds]) for reduce in reductions])
+    result = paired_impact_bootstrap(left, right, 2000)
+    for j, (key, reduce) in enumerate(zip(('mean', 'median', 'p90'), reductions)):
+        assert result[key]['difference'] == pytest.approx((reduce(a, axis=1) - reduce(b, axis=1)).mean())
+        np.testing.assert_allclose([result[key]['ci_low'], result[key]['ci_high']],
+                                   np.percentile(np.asarray(samples)[:, j], [2.5, 97.5]))
+    assert result['median']['difference'] != np.median(a - b, axis=1).mean()
+    assert paired_impact_bootstrap(left, left, 20) == {
+        key: {'difference': 0., 'ci_low': 0., 'ci_high': 0.} for key in result}
+    baseline = {None: right[2021]}
+    forward = paired_impact_bootstrap(left, baseline, 100)
+    reverse = paired_impact_bootstrap(baseline, left, 100)
+    assert forward == paired_impact_bootstrap(left, {s: right[2021] for s in left}, 100)
+    for key in result:
+        assert reverse[key]['difference'] == -forward[key]['difference']
+        assert reverse[key]['ci_low'] == pytest.approx(-forward[key]['ci_high'])
+        assert reverse[key]['ci_high'] == pytest.approx(-forward[key]['ci_low'])
+    with pytest.raises(ValueError, match='matching seed'):
+        paired_impact_bootstrap(left, {2021: right[2021]}, 20)
+    with pytest.raises(ValueError, match='align'):
+        paired_impact_bootstrap(left, {None: np.zeros(3)}, 20)
+    with pytest.raises(ValueError, match='positive'):
+        paired_impact_bootstrap(left, right, 0)
+
+
+def test_pooled_worst_class_bootstrap_recomputes_each_methods_maximum():
+    from tools.summarize_protocol_v2 import paired_pool_bootstrap
+
+    lengths = {'a': np.array([1, 2]), 'b': np.array([2, 1])}
+    left = {'a': {2021: {'totals': np.array([0., 18.]), 'impact': np.array([0., 9.])},
+                  2022: {'totals': np.array([0., 24.]), 'impact': np.array([0., 12.])}},
+            'b': {2021: {'totals': np.array([16., 0.]), 'impact': np.array([8., 0.])},
+                  2022: {'totals': np.array([20., 0.]), 'impact': np.array([10., 0.])}}}
+    right = {'a': {None: {'totals': np.array([0., 3.]), 'impact': np.array([0., 1.5])}},
+             'b': {None: {'totals': np.array([21., 0.]), 'impact': np.array([10.5, 0.])}}}
+    result = paired_pool_bootstrap(left, right, lengths, 2000)
+    # Left's worst class is a; right's is b. Max of differences would give 6.
+    assert result['worst_class_ade']['difference'] == pytest.approx(0.)
+    assert result['class_mean_ade']['difference'] == pytest.approx(2.5)
+    assert result['impact_p90']['difference'] == pytest.approx(2.25)
+    rng = np.random.default_rng(0)
+    expected = []
+    worst_classes = set()
+    for _ in range(2000):
+        draws = {c: rng.integers(2, size=2) for c in lengths}
+        seeds = rng.integers(2, size=2) + 2021
+        differences = []
+        for seed in seeds:
+            a = [left[c][seed]['totals'][draws[c]].sum() / lengths[c][draws[c]].sum() for c in lengths]
+            b = [right[c][None]['totals'][draws[c]].sum() / lengths[c][draws[c]].sum() for c in lengths]
+            worst_classes.add(int(np.argmax(a)))
+            a_impact = np.concatenate([left[c][seed]['impact'][draws[c]] for c in lengths])
+            b_impact = np.concatenate([right[c][None]['impact'][draws[c]] for c in lengths])
+            differences.append([np.mean(a) - np.mean(b), max(a) - max(b),
+                                np.percentile(a_impact, 90) - np.percentile(b_impact, 90)])
+        expected.append(np.mean(differences, axis=0))
+    assert worst_classes == {0, 1}
+    for j, key in enumerate(('class_mean_ade', 'worst_class_ade', 'impact_p90')):
+        np.testing.assert_allclose([result[key]['ci_low'], result[key]['ci_high']],
+                                   np.percentile(np.asarray(expected)[:, j], [2.5, 97.5]))
+    repeated = {c: {s: runs[None] for s in (2021, 2022)} for c, runs in right.items()}
+    assert result == paired_pool_bootstrap(left, repeated, lengths, 2000)
+    assert all(stat == {'difference': 0., 'ci_low': 0., 'ci_high': 0.}
+               for stat in paired_pool_bootstrap(left, left, lengths, 20).values())
+    with pytest.raises(ValueError, match='matching seed'):
+        paired_pool_bootstrap(left, {c: {2021: runs[None]} for c, runs in right.items()}, lengths, 20)
+
+
+def test_signed_impact_components_use_existing_crossing_and_terminal_direction():
+    from tools.summarize_protocol_v2 import signed_impact_components
+    from utils.metrics import impact_metrics
+
+    true = np.array([[[0., 0., 3.], [1., 0., 1.], [1., 0., 0.]],
+                     [[0., 0., 3.], [0., 1., 1.], [0., 2., 0.]]])
+    pred = np.array([[[2., -2., 3.], [4., -2., 1.], [6., -2., -1.]],
+                     [[1., 3., 3.], [1., 4., 2.], [1., 5., 1.]]])
+    lengths = np.array([3, 3])
+    signed = signed_impact_components(pred, true, lengths)
+    np.testing.assert_allclose(signed['along'], [4., 2.])
+    np.testing.assert_allclose(signed['cross'], [2., 1.])
+    np.testing.assert_allclose(signed['tti'], [-0.005, -0.01])
+    metrics = impact_metrics(pred, true, lengths)
+    np.testing.assert_allclose(np.hypot(signed['along'], signed['cross']), metrics['impact_err_m'])
+    np.testing.assert_allclose(np.abs(signed['tti']), metrics['tti_abs_err_s'])
+
+
 def test_summary_arrays_prefix_wind_and_bootstrap(tmp_path, monkeypatch, capsys):
     from tools import summarize_protocol_v2 as summary
     from utils.metrics import evaluate, metric
@@ -304,6 +444,30 @@ def test_summary_arrays_prefix_wind_and_bootstrap(tmp_path, monkeypatch, capsys)
     stats = summary.seed_stats(runs, ('overall',))['ade_m']
     assert stats == pytest.approx((np.mean(expected), np.std(expected, ddof=1)))
     assert metric(true, true) == (0, 0, 0, 0)  # Legacy API survives the merge.
+    capsys.readouterr()
+
+    for seed in (2021, 2022):
+        run_dir = tmp_path / 'results' / f'ballistic_forecast_best_R5c_TimeMixer_s{seed}_TimeMixer_sl100'
+        run_dir.mkdir()
+        pred = true.copy()
+        pred[:, :, 0] = 5
+        for filename, value in [('pred', pred), ('true', true), ('valid_len', lengths)]:
+            np.save(run_dir / f'{filename}.npy', value)
+    monkeypatch.setattr(sys, 'argv', ['summary', '--out', str(tmp_path), '--data-dir', str(tmp_path),
+                                     '--physics', str(physics_dir), '--prefix', 'main_,best_', '--bootstrap', '50',
+                                     '--pairs', 'R5c:PASTMixer,B4_DragLS', '--group-by', 'projectile',
+                                     '--runner-up', 'R5c:PASTMixer', '--impact-bootstrap',
+                                     '--physics-methods', 'B4_DragLS', '--report', str(tmp_path / 'class.md')])
+    summary.main()
+    grouped = (tmp_path / 'class.md').read_text(encoding='utf-8')
+    assert 'projectile: a / nominal (n=1)' in grouped
+    assert 'projectile: b / extrapolative (n=1)' in grouped
+    assert 'projectile: a / all (n=1)' in grouped
+    assert 'wind: linear' not in grouped
+    assert '| R5c:PASTMixer | R5c:TimeMixer | -3.000 | [-4.000, -2.000] |' in grouped
+    assert '| R5c:PASTMixer | B4_DragLS | median | 2.000 | [1.000, 3.000] |' in grouped
+    assert not (tmp_path / 'summary_main_best_runs.json').exists()
+    assert (tmp_path / 'summary_main.md').read_text(encoding='utf-8') == report
     capsys.readouterr()
 
 

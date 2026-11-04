@@ -52,6 +52,16 @@ class MaskedMSELoss(nn.Module):
         return (squared * weights).sum() / weights.sum().clamp_min(1.0)
 
 
+class PhysicalMSELoss(MaskedMSELoss):
+    """Masked MSE in meters: equal coordinate weights, no square root or ADE/FDE terms."""
+    def __init__(self, scale):
+        super().__init__()
+        self.register_buffer('scale', torch.as_tensor(scale, dtype=torch.float32).reshape(1, 1, -1))
+
+    def forward(self, prediction, target, mask=None):
+        return super().forward(prediction * self.scale, target * self.scale, mask)
+
+
 class Exp_Ballistic:
     def __init__(self, args):
         self.args = args
@@ -94,6 +104,8 @@ class Exp_Ballistic:
         return optim.Adam(self.model.parameters(), lr=self.args.learning_rate)
 
     def _select_criterion(self):
+        if str(getattr(self.args, 'loss_mode', 'mse')).lower() == 'physical_mse':
+            return PhysicalMSELoss(scale=self.target_scale)
         if str(getattr(self.args, 'loss_mode', 'mse')).lower() == 'physical_composite':
             return PhysicalCompositeLoss(
                 scale=self.target_scale,

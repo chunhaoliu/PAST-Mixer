@@ -100,7 +100,7 @@ def parse_args():
     parser.add_argument('--learning_rate', type=float, default=0.001)
     parser.add_argument('--lradj', type=str, default='type3')
     parser.add_argument('--loss_mode', type=str, default='physical_composite',
-                        choices=['mse', 'physical_composite'])
+                        choices=['mse', 'physical_mse', 'physical_composite'])
     parser.add_argument('--ade_loss_weight', type=float, default=0.5)
     parser.add_argument('--fde_loss_weight', type=float, default=0.25)
     parser.add_argument('--select_metric', type=str, default='loss',
