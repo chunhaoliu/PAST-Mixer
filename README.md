@@ -8,7 +8,7 @@ PAST-Mixer fits a generic drag model to a short radar track and learns the ancho
 
 This repository contains the six backbones, training and evaluation pipeline, Drag-LS anchor fit and model-based baselines, experiment matrices, tests, and a non-operational synthetic smoke-test generator. The parameterized benchmark generator, upstream radar tracker, generated benchmark data, checkpoints, and result arrays are not included in this source-only release.
 
-The manuscript benchmark uses controlled representative projectile-class simulation and is not field telemetry, an exact firing-table reconstruction, or an operational deployment study. Demo data verify the software interface only and must not be used to reproduce or reinterpret the manuscript results. The first-submission code remains at tag `submission-release`.
+The manuscript reports two benchmarks with different truth aerodynamics: a high-fidelity main benchmark (International Standard Atmosphere and a transonic drag rise) and a nominal-physics second benchmark (exponential atmosphere). Both use the same split layout below and the same tools. The manuscript benchmark uses controlled representative projectile-class simulation and is not field telemetry, an exact firing-table reconstruction, or an operational deployment study. Demo data verify the software interface only and must not be used to reproduce or reinterpret the manuscript results. The first-submission code remains at tag `submission-release`.
 
 ## Installation
 
@@ -55,10 +55,11 @@ Place `protocol_manifest.json` in the dataset directory for run provenance. The 
 The released baseline script builds these arrays from compatible benchmark splits. Its input additionally requires tensor fields `polar` `(N, W + L, 3)` (range in meters, azimuth/elevation in radians) and `detected` `(N, W + L)` (boolean), plus `meta.domain` and `meta.radar_site_xyz_m` `(N, 3)`. The manuscript uses W=300 warm-up samples. This script expects tensor-valued `X`, `X_observed`, and `valid_len`; the training loader also accepts NumPy arrays. It estimates the beta prior from clean training trajectories and selects fit strength on validation; each anchor fit uses only that trajectory's tracked window.
 
 ```bash
+python tools/evaluate_protocol_v2_physics_baselines.py --data-dir data/protocol_hf --out outputs/protocol_hf/physics_baselines
 python tools/evaluate_protocol_v2_physics_baselines.py --data-dir data/protocol_v2 --out outputs/protocol_v2/physics_baselines
 ```
 
-This evaluates CV, CA, CV+gravity, Drag-LS, and Drag-UKF and writes anchors for all splits. `--fast` skips Drag-UKF. For additional compatible splits, `--anchors-only --report outputs/protocol_v2/physics_baselines/report.json` reuses the stored training prior and validation-selected fit strength. The demo does not supply polar measurements and does not exercise this script.
+This evaluates CV, CA, CV+gravity, Drag-LS, Drag-UKF, and Drag-LS-Std and writes Drag-LS anchors for all splits. Drag-LS-Std is the Drag-LS fit with a standard drag function of Mach number (G1 or G7) and an ISA atmosphere; the table and prior strength are selected on validation, and its prior acts on the window-end drag level. `--fast` skips Drag-UKF and `--no-anchors` writes baseline predictions only. For additional compatible splits, `--anchors-only --report outputs/protocol_hf/physics_baselines/report.json` reuses the stored training prior and validation-selected fit strength; adding `--anchor-model b6` writes anchors from the selected Drag-LS-Std fit instead. The demo does not supply polar measurements and does not exercise this script.
 
 ## Paper protocol and experiments
 
@@ -72,6 +73,8 @@ Print a matrix with:
 python configs/experiments/main_v3_20261102.py main
 ```
 
+The matrices use `data/protocol_v2` (nominal benchmark) by default. Set the environment variable `BTP_DATA` to another protocol root, e.g. `data/protocol_hf`, to run every stage on that benchmark; derived datasets use its suffixes (`protocol_hf_hold`, `protocol_hf_holdaero`), and a `protocol_hf` root selects the baseline sizes tuned on the high-fidelity benchmark.
+
 Stages are `main` (fixed-size recipe study), `abl`, `tune`, `best` (tuned baselines), `rand`, `win`, and `stress <condition> [fair|rand]`. Stress and window stages expect separately prepared compatible datasets; their generator is not released.
 
 Build the 30-job main-table comparison (five PAST-Mixer seeds and five seeds for each tuned baseline), run it, and summarize saved physical-coordinate predictions:
@@ -84,11 +87,11 @@ python tools/summarize_protocol_v2.py --out outputs/paper --data-dir data/protoc
 
 The queue writes logs, checkpoints, results, and status under its output directory and skips jobs with existing metrics. For CPU runs, append `--use_gpu 0` to each job's argument list before queuing. Summaries report seed mean and sample standard deviation, with paired trajectory/seed bootstrap intervals when requested. Benchmark runs require the compatible data and anchors described above.
 
-Stage `hold` trains the leave-one-class-out models on datasets built by `tools/make_holdout_data.py`; `tools/summarize_protocol_v2.py --pool-holdout` pools them with class-stratified bootstrap intervals. `tools/conformal_protocol_v2.py` computes split-conformal impact regions from saved R5c PAST-Mixer checkpoints (inference only): disks centered on the seed-ensemble impact and scaled by the seed spread, calibrated on the validation split.
+Stages `hold` and `holdaero` train the leave-one-class-out models on datasets built by `tools/make_holdout_data.py` (`holdaero`: aerodynamically randomized training and validation splits, with the test split taken from `--test-source`); `tools/summarize_protocol_v2.py --pool-holdout <root> --pool-tag hold|holdaero [--runs <dir>]` pools them with class-stratified bootstrap intervals and includes Drag-LS-Std when present. `tools/conformal_protocol_v2.py [--hold-tag hold|holdaero]` computes split-conformal impact regions from saved R5c PAST-Mixer checkpoints (inference only): disks centered on the seed-ensemble impact and scaled by the seed spread, calibrated on the validation split.
 
 ## Manuscript evidence
 
-The abstract reports ADE 38.3 m versus Drag-LS 65.6 m (42% reduction) and the best purely learned predictor's 69.7 m (45% reduction). Physics anchoring reduces every tested backbone's ADE by 44%-53%. PAST-Mixer's 90th-percentile impact error is 94.9 m and TTI error is 0.187 s; all five paired ADE confidence intervals exclude zero. It retains the lowest ADE in every lead-time bin and improves on Drag-LS across all nine radar perturbations. On projectile classes withheld from training, the anchored recipe reduces the class-mean ADE from 257.3 to 71.5 m. These manuscript results are not regenerated by the source-only demo.
+On the high-fidelity benchmark PAST-Mixer reaches 38.3 m ADE, 33% below the strongest physical baseline, Drag-LS-Std (57.1 m), and improves on it under all nine radar degradations; its impact error is 38.0 m median and 98.6 m at the 90th percentile, with 0.170 s TTI error. Physics anchoring reduces the ADE of each of five backbones by 49%-56%. Among six backbones tuned with equal budgets, PAST-Mixer has the lowest ADE on both benchmarks (38.3 m on each). Under leave-one-class-out training the anchored networks reach about half the physical error on the withheld artillery classes. These manuscript results are not regenerated by the source-only demo.
 
 ## Citation
 
