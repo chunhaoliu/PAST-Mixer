@@ -30,8 +30,10 @@ def main():
     parser.add_argument('--source', type=Path, default=ROOT.parent / 'data/protocol_v2')
     parser.add_argument('--data-root', type=Path, default=ROOT.parent / 'data/protocol_v2_hold')
     parser.add_argument('--out-root', type=Path, default=ROOT.parent / 'outputs/hold_v3')
+    parser.add_argument('--test-source', type=Path, help='Take test.pt from here instead (default: --source)')
     args = parser.parse_args()
-    splits = {name: torch.load(args.source / f'{name}.pt', weights_only=False) for name in ('train', 'val', 'test')}
+    splits = {name: torch.load((args.test_source if name == 'test' and args.test_source else args.source) /
+                               f'{name}.pt', weights_only=False) for name in ('train', 'val', 'test')}
     tool = ROOT / 'tools/evaluate_protocol_v2_physics_baselines.py'
     for short, cls in CLASSES.items():
         data_dir = args.data_root / short
@@ -50,6 +52,8 @@ def main():
             source = json.loads((args.source / 'protocol_manifest.json').read_text(encoding='utf-8'))
             source['holdout_class'] = cls
             source['holdout_rule'] = 'train/val exclude holdout_class; test is holdout_class only (both domains)'
+            if args.test_source:
+                source['test_source'] = str(args.test_source)
             manifest.write_text(json.dumps(source, indent=2), encoding='utf-8')
         # The full baseline run also writes the anchors of every split.
         physics = args.out_root / short / 'physics'

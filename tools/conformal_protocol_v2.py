@@ -110,7 +110,7 @@ def infer(args):
         for cls in HOLD_CLASSES:
             data = args.hold_data / cls
             hold_view = view(data, 'val', cls)
-            hold_jobs += [inference_job(run_dir(args.hold_out, f'hold{cls}', seed), hold_view, data)
+            hold_jobs += [inference_job(run_dir(args.hold_out, f'{args.hold_tag}{cls}', seed), hold_view, data)
                           for seed in range(2021, 2024)]
         queue_jobs(hold_jobs, args.out / 'hold', args.hold_out / 'checkpoints', args.gpus)
 
@@ -274,6 +274,7 @@ def main():
     parser.add_argument('--main-out', type=Path, default=base / 'outputs/main_v3')
     parser.add_argument('--hold-out', type=Path, default=base / 'outputs/hold_v3')
     parser.add_argument('--out', type=Path, default=base / 'outputs/conf_v3')
+    parser.add_argument('--hold-tag', default='hold', help='Holdout run prefix: hold or holdaero')
     parser.add_argument('--infer', action='store_true', help='Reproduce one test run and infer all validation splits')
     parser.add_argument('--gpus', default='0,1')
     args = parser.parse_args()
@@ -290,7 +291,7 @@ def main():
         is_main = pool == 'main'
         data = args.data_dir if is_main else args.hold_data / pool
         source = args.main_out if is_main else args.hold_out
-        prefix = 'main' if is_main else f'hold{pool}'
+        prefix = 'main' if is_main else f'{args.hold_tag}{pool}'
         seeds = list(range(2021, 2026 if is_main else 2024))
         val = load_ensemble(args.out / ('main' if is_main else 'hold'), data, 'val', prefix, seeds)
         test = load_ensemble(source, data, 'test', prefix, seeds)

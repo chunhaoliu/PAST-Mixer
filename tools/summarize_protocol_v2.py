@@ -252,12 +252,17 @@ def paired_pool_bootstrap(left, right, lengths, n=2000, seed=0):
 
 def summarize_pool(args):
     root = Path(args.pool_holdout).resolve()
+    runs_root = Path(args.runs).resolve() if args.runs else root
     seeds = (2021, 2022, 2023)
+    methods = HOLD_METHODS
+    if (root / 'a155' / 'physics' / 'pred_B6_DragLSStd.npy').exists():
+        methods = methods[:2] + ('B6_DragLSStd',) + methods[2:]
     classes, lengths = {}, {}
     for cls, projectile in HOLD_CLASSES.items():
+        data = Path(args.data_dir)
         records, valid_len, meta = load_pool_methods(
-            root, root / cls / 'physics', Path(args.data_dir).parent / 'protocol_v2_hold' / cls,
-            f'hold{cls}_', HOLD_METHODS, seeds)
+            runs_root, root / cls / 'physics', data.parent / f'{data.name}_{args.pool_tag}' / cls,
+            f'{args.pool_tag}{cls}_', methods, seeds)
         if (len(valid_len) != 450 or set(meta['projectile']) != {projectile} or
                 set(meta['domain']) != {'nominal', 'extrapolative'}):
             raise ValueError(f'Expected 450 {projectile} trajectories in both domains')
@@ -282,7 +287,7 @@ def summarize_pool(args):
              'Distances are in m; time is in s.', '',
              '| Method | a155 ADE | a122 ADE | r130 ADE | r227 ADE | Class-mean ADE | Worst-class ADE | Impact median | Impact p90 | TTI abs err (s) |',
              '|---|---|---|---|---|---|---|---|---|---|']
-    for name in HOLD_METHODS:
+    for name in methods:
         ade = np.array([[run(cls, name, s)['overall']['ade_m'] for cls in classes] for s in seeds])
         impacts = np.array([np.concatenate([run(cls, name, s)['impact'] for cls in classes]) for s in seeds])
         tti = [np.concatenate([run(cls, name, s)['tti_abs'] for cls in classes]).mean() for s in seeds]
@@ -297,14 +302,14 @@ def summarize_pool(args):
               'impact p90 before subtraction in every resample. Negative favors PAST-Mixer.', '',
               '| Comparator | Statistic | Difference | 95% CI |', '|---|---|---|---|']
     left = {cls: records['R5c:PASTMixer'] for cls, records in classes.items()}
-    for name in HOLD_METHODS:
+    for name in methods:
         if name == 'R5c:PASTMixer':
             continue
         right = {cls: records[name] for cls, records in classes.items()}
         for key, stat in paired_pool_bootstrap(left, right, lengths, n).items():
             lines.append(f"| {name} | {key} | {stat['difference']:.3f} | [{stat['ci_low']:.3f}, {stat['ci_high']:.3f}] |")
 
-    main, _, main_meta = load_pool_methods(root.parent / 'main_v3', Path(args.physics), Path(args.data_dir),
+    main, _, main_meta = load_pool_methods(runs_root if args.runs else root.parent / 'main_v3', Path(args.physics), Path(args.data_dir),
                                           'main_', ('B4_DragLS', 'R5c:PASTMixer'), range(2021, 2026))
     lines += ['', '## Signed impact error mechanism', '',
               'All entries are trajectory means within a class, then seed mean ± sample std '
@@ -356,6 +361,8 @@ def main():
     parser.add_argument('--physics-methods', default='', help='Comma-separated physics methods; default: all')
     parser.add_argument('--report', help='Write only Markdown to this path instead of the default Markdown/JSON outputs')
     parser.add_argument('--pool-holdout', help='Pool four holdouts under this root into summary_pool.md; --data-dir/--physics locate main-test references; --bootstrap defaults to 2000')
+    parser.add_argument('--runs', help='For --pool-holdout: directory whose results/ holds holdout and main runs (default: holdout root and ../main_v3)')
+    parser.add_argument('--pool-tag', default='hold', help='Holdout tag for --pool-holdout: data protocol_v2_<tag>/<cls>, runs <tag><cls>_')
     args = parser.parse_args()
     if args.bootstrap < 0:
         parser.error('--bootstrap must be nonnegative')
