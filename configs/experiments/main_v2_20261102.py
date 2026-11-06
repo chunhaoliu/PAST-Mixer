@@ -1,9 +1,11 @@
 """Formal protocol v2 job matrices; print JSON with main, abl, tune, best, rand, stress or win."""
 import json
+import os
 import sys
 from itertools import product
 
-DATA = 'data/protocol_v2'
+# BTP_DATA switches the whole matrix to another protocol root (e.g. protocol_hf); derived sets use its suffixes.
+DATA = os.environ.get('BTP_DATA', 'data/protocol_v2')
 COMMON = ['--is_training', '1', '--dataset_dir', DATA, '--observation_mode', 'tracked',
           '--seq_len', '100', '--label_len', '0', '--pred_len', '2000',
           '--d_model', '256', '--d_ff', '512', '--dropout', '0.1',
