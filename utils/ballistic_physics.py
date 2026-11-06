@@ -5,6 +5,10 @@ ballistic coefficient ``beta = Cd * A / m`` estimated from data, no wind and
 no Coriolis term. It deliberately does not reuse the simulator's Mach-dependent
 drag law, aerodynamic class parameters or wind, which a fielded predictor
 would not know.
+
+``model='g1'`` or ``'g7'`` (baseline B6) replaces the constant drag coefficient
+by a public standard drag function of Mach number, with ISA density and speed
+of sound; beta then scales the table shape (normalized to 1 at Mach 0.5).
 """
 from __future__ import annotations
 
@@ -14,37 +18,78 @@ DT = 0.01
 G = 9.81
 RHO0 = 1.225
 SCALE_HEIGHT = 7400.0
+# Standard drag functions (Mach, Cd), as tabulated in py-ballisticcalc / JBM.
+G1_MACH = np.array([0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.55, 0.6, 0.7, 0.75, 0.8, 0.85, 0.9, 0.925, 0.95, 0.975,
+                    1.0, 1.025, 1.05, 1.075, 1.1, 1.125, 1.15, 1.2, 1.25, 1.3, 1.35, 1.4, 1.45, 1.5, 1.6, 1.7,
+                    1.8, 1.9, 2.0, 2.2, 2.4, 2.6, 2.8, 3.0, 3.5, 4.0])
+G1_CD = np.array([0.2629, 0.2487, 0.2344, 0.2214, 0.2104, 0.2032, 0.2020, 0.2034, 0.2165, 0.2313, 0.2546,
+                  0.2901, 0.3415, 0.3734, 0.4084, 0.4448, 0.4805, 0.5136, 0.5427, 0.5677, 0.5883, 0.6053,
+                  0.6191, 0.6393, 0.6518, 0.6589, 0.6621, 0.6625, 0.6607, 0.6573, 0.6474, 0.6347, 0.6210,
+                  0.6072, 0.5934, 0.5685, 0.5481, 0.5325, 0.5211, 0.5133, 0.5040, 0.5006]) / 0.2032
+G7_MACH = np.array([0.0, 0.5, 0.6, 0.65, 0.7, 0.725, 0.75, 0.775, 0.8, 0.825, 0.85, 0.875, 0.9, 0.925, 0.95,
+                    0.975, 1.0, 1.025, 1.05, 1.075, 1.1, 1.125, 1.15, 1.2, 1.25, 1.3, 1.35, 1.4, 1.5, 1.6,
+                    1.7, 1.8, 1.9, 2.0, 2.2, 2.4, 2.6, 2.8, 3.0, 3.5, 4.0])
+G7_CD = np.array([0.1198, 0.1194, 0.1194, 0.1197, 0.1202, 0.1207, 0.1215, 0.1226, 0.1242, 0.1266, 0.1306,
+                  0.1368, 0.1464, 0.1660, 0.2054, 0.2993, 0.3803, 0.4015, 0.4043, 0.4034, 0.4014, 0.3987,
+                  0.3955, 0.3884, 0.3810, 0.3732, 0.3657, 0.3580, 0.3440, 0.3315, 0.3209, 0.3117, 0.3042,
+                  0.2980, 0.2864, 0.2752, 0.2643, 0.2533, 0.2424, 0.2154, 0.1935]) / 0.1194
+DRAG_TABLES = {'g1': (G1_MACH, G1_CD), 'g7': (G7_MACH, G7_CD)}
 
 
-def drag_acceleration(velocity, height, beta):
+def isa(height):
+    """ISA density (kg/m^3) and speed of sound (m/s): 6.5 K/km lapse to 11 km, isothermal above."""
+    h = np.clip(height, 0.0, 20000.0)
+    temp = np.maximum(288.15 - 0.0065 * h, 216.65)
+    pressure = np.where(h <= 11000.0, 101325.0 * (temp / 288.15) ** 5.25588,
+                        22632.06 * np.exp(-(h - 11000.0) / (287.05287 * 216.65 / G)))
+    return pressure / (287.05287 * temp), np.sqrt(1.4 * 287.05287 * temp)
+
+
+def drag_scale(state, model='const'):
+    """Table drag factor at the state's Mach number (1 for the constant model).
+
+    For a table model the beta prior acts on beta * drag_scale(window-end state), the
+    drag level the window observes, since beta alone shifts with the Mach regime.
+    """
+    if model not in DRAG_TABLES:
+        return np.ones(len(state))
+    _, sound = isa(state[:, 2])
+    return np.interp(np.linalg.norm(state[:, 3:6], axis=-1) / sound, *DRAG_TABLES[model])
+
+
+def drag_acceleration(velocity, height, beta, model='const'):
     """(N,3) acceleration of a point mass with ballistic coefficient beta (N,)."""
-    rho = RHO0 * np.exp(-np.maximum(height, 0.0) / SCALE_HEIGHT)
     speed = np.linalg.norm(velocity, axis=-1)
+    if model in DRAG_TABLES:
+        rho, sound = isa(height)
+        beta = beta * np.interp(speed / sound, *DRAG_TABLES[model])
+    else:
+        rho = RHO0 * np.exp(-np.maximum(height, 0.0) / SCALE_HEIGHT)
     accel = -0.5 * (rho * beta * speed)[:, None] * velocity
     accel[:, 2] -= G
     return accel
 
 
-def _derivative(state, beta):
+def _derivative(state, beta, model='const'):
     out = np.empty_like(state)
     out[:, :3] = state[:, 3:]
-    out[:, 3:] = drag_acceleration(state[:, 3:], state[:, 2], beta)
+    out[:, 3:] = drag_acceleration(state[:, 3:], state[:, 2], beta, model)
     return out
 
 
-def rk4_step(state, beta, dt=DT):
-    k1 = _derivative(state, beta)
-    k2 = _derivative(state + 0.5 * dt * k1, beta)
-    k3 = _derivative(state + 0.5 * dt * k2, beta)
-    k4 = _derivative(state + dt * k3, beta)
+def rk4_step(state, beta, dt=DT, model='const'):
+    k1 = _derivative(state, beta, model)
+    k2 = _derivative(state + 0.5 * dt * k1, beta, model)
+    k3 = _derivative(state + 0.5 * dt * k2, beta, model)
+    k4 = _derivative(state + dt * k3, beta, model)
     return state + (dt / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
 
 
-def integrate(state, beta, steps, dt=DT):
+def integrate(state, beta, steps, dt=DT, model='const'):
     """Positions (N, steps, 3) after each of ``steps`` RK4 steps."""
     out = np.empty((len(state), steps, 3))
     for step in range(steps):
-        state = rk4_step(state, beta, dt)
+        state = rk4_step(state, beta, dt, model)
         out[:, step] = state[:, :3]
     return out
 
@@ -73,7 +118,7 @@ def polynomial_predict(track, horizon, degree, gravity=False):
     return pred
 
 
-def drag_window_trajectory(params, window=100):
+def drag_window_trajectory(params, window=100, model='const'):
     """Positions over the fit window, integrating backward from [p_end,v_end,beta]."""
     n = len(params)
     state = params[:, :6].copy()
@@ -82,22 +127,22 @@ def drag_window_trajectory(params, window=100):
     positions = np.empty((n, window, 3))
     positions[:, -1] = state[:, :3]
     for step in range(window - 2, -1, -1):
-        state = rk4_step(state, beta, -DT)
+        state = rk4_step(state, beta, -DT, model)
         positions[:, step] = state[:, :3]
     return positions
 
 
-def _window_residual(params, track, beta_prior):
+def _window_residual(params, track, beta_prior, model='const'):
     """Residuals of a backward-integrated drag trajectory against the window."""
-    residual = (drag_window_trajectory(params, track.shape[1]) - track).reshape(len(track), -1)
+    residual = (drag_window_trajectory(params, track.shape[1], model) - track).reshape(len(track), -1)
     if beta_prior is not None:
         mean, std, noise = beta_prior
-        beta = params[:, 6]
+        beta = params[:, 6] * drag_scale(params, model)
         residual = np.concatenate([residual, (noise * (beta - mean) / std)[:, None]], axis=1)
     return residual
 
 
-def fit_drag_window(track, beta_prior, iterations=8, init=None):
+def fit_drag_window(track, beta_prior, iterations=8, init=None, model='const'):
     """Levenberg-Marquardt MAP fit of [p_end, v_end, beta] to (N,L,3) tracks.
 
     ``beta_prior`` = (mean, std, residual_scale): a Gaussian prior on beta
@@ -106,18 +151,19 @@ def fit_drag_window(track, beta_prior, iterations=8, init=None):
     n = track.shape[0]
     if init is None:
         coef = polynomial_fit(track, 2, gravity=False)
-        init = np.concatenate([coef[0], coef[1], np.full((n, 1), beta_prior[0])], axis=1)
+        init = np.concatenate([coef[0], coef[1], np.zeros((n, 1))], axis=1)
+        init[:, 6] = beta_prior[0] / drag_scale(init, model)
     params = init.astype(np.float64)
     damping = np.full(n, 1e-3)
     steps = np.array([1e-2, 1e-2, 1e-2, 1e-3, 1e-3, 1e-3, 1e-6])
-    cost = (_window_residual(params, track, beta_prior) ** 2).sum(1)
+    cost = (_window_residual(params, track, beta_prior, model) ** 2).sum(1)
     for _ in range(iterations):
-        base = _window_residual(params, track, beta_prior)
+        base = _window_residual(params, track, beta_prior, model)
         jac = np.empty(base.shape + (7,))
         for j in range(7):
             shifted = params.copy()
             shifted[:, j] += steps[j]
-            jac[..., j] = (_window_residual(shifted, track, beta_prior) - base) / steps[j]
+            jac[..., j] = (_window_residual(shifted, track, beta_prior, model) - base) / steps[j]
         jtj = np.einsum('nri,nrj->nij', jac, jac)
         jtr = np.einsum('nri,nr->ni', jac, base)
         diag = np.einsum('nii->ni', jtj)
@@ -125,7 +171,7 @@ def fit_drag_window(track, beta_prior, iterations=8, init=None):
         delta = -np.linalg.solve(system, jtr[..., None])[..., 0]
         candidate = params + delta
         candidate[:, 6] = np.maximum(candidate[:, 6], 0.0)
-        new_cost = (_window_residual(candidate, track, beta_prior) ** 2).sum(1)
+        new_cost = (_window_residual(candidate, track, beta_prior, model) ** 2).sum(1)
         better = new_cost < cost
         params[better] = candidate[better]
         cost[better] = new_cost[better]
@@ -133,8 +179,8 @@ def fit_drag_window(track, beta_prior, iterations=8, init=None):
     return params
 
 
-def drag_predict(params, horizon):
-    return integrate(params[:, :6].copy(), params[:, 6], horizon)
+def drag_predict(params, horizon, model='const'):
+    return integrate(params[:, :6].copy(), params[:, 6], horizon, model=model)
 
 
 def _polar_of(state, sites):

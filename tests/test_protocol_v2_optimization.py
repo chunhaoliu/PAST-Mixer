@@ -184,7 +184,7 @@ def test_anchors_only_reuses_report_without_selection_or_evaluation(tmp_path, mo
     calls = []
     params = np.array([[100., 200., 300., 10., 20., 30., 1e-4]])
     monkeypatch.setattr(physics, 'load', lambda directory, split: {'obs': np.zeros((1, 100, 3))})
-    def fit(obs, prior):
+    def fit(obs, prior, **_):
         calls.append(prior)
         return params
     monkeypatch.setattr(physics, 'fit_drag_window', fit)
@@ -567,8 +567,8 @@ def test_physics_test_only_directory_uses_reference_train_and_val(tmp_path, monk
         loaded.append((Path(directory), name))
         return split
     monkeypatch.setattr(physics, 'load', load)
-    monkeypatch.setattr(physics, 'beta_prior_from_train', lambda train: {'mean': 1e-4, 'std': 3e-5})
-    monkeypatch.setattr(physics, 'run_b4', lambda data, prior, noise, horizon:
+    monkeypatch.setattr(physics, 'beta_prior_from_train', lambda train, **_: {'mean': 1e-4, 'std': 3e-5})
+    monkeypatch.setattr(physics, 'run_b4', lambda data, prior, noise, horizon, *_:
                         (physics.truth(data, horizon), np.full(2, prior['mean'])))
     monkeypatch.setattr(physics, 'save_anchors', lambda directory, name, *args: anchors.append((Path(directory), name)))
     monkeypatch.setattr(physics, 'run_b5', lambda *a, **k: pytest.fail('fast/anchors-only must skip UKF'))
@@ -582,3 +582,30 @@ def test_physics_test_only_directory_uses_reference_train_and_val(tmp_path, monk
         report = json.loads((tmp_path / 'physics/report.json').read_text())
         assert report['prior_dir'] == str(reference.resolve())
         assert 'B4_DragLS' in report['test'] and 'B5_DragUKF' not in report['test']
+
+
+def test_b6_standard_drag_tables_isa_and_fit():
+    from utils.ballistic_physics import DRAG_TABLES, drag_scale, fit_drag_window, integrate, isa
+
+    rho, sound = isa(np.array([0., 5000., 11000., 15000.]))
+    np.testing.assert_allclose(rho, [1.225, 0.7361, 0.3639, 0.1937], rtol=2e-3)
+    np.testing.assert_allclose(sound[0], 340.3, atol=0.1)
+    for mach, cd in DRAG_TABLES.values():  # normalized at Mach 0.5, transonic peak
+        np.testing.assert_allclose(np.interp(0.5, mach, cd), 1.0, atol=1e-3)
+        assert 0.9 < mach[cd.argmax()] < 1.5
+    state = np.array([[0., 0., 3000., 250., 0., -100.]])
+    beta = np.array([1e-4])
+    assert np.array_equal(integrate(state, beta, 5), integrate(state, beta, 5, model='const'))
+    assert not np.allclose(integrate(state, beta, 50), integrate(state, beta, 50, model='g7'))
+    np.testing.assert_allclose(drag_scale(state), 1.0)
+
+    # A noise-free g7 window is recovered by the g7 MAP fit; the prior acts on the window-end drag level.
+    end = state.copy()
+    for _ in range(99):
+        end = rk4_step(end, beta, model='g7')
+    track = np.concatenate([state[:, None, :3], integrate(state, beta, 99, model='g7')], axis=1)
+    level = beta * drag_scale(end, 'g7')
+    params = fit_drag_window(track, (float(level[0]), 3e-5, 1.0), model='g7')
+    np.testing.assert_allclose(params[:, :3], end[:, :3], atol=0.05)
+    np.testing.assert_allclose(params[:, 3:6], end[:, 3:], atol=0.05)
+    np.testing.assert_allclose(params[:, 6], beta, rtol=0.05)

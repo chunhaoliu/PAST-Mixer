@@ -9,6 +9,8 @@ the raw polar measurements of the same warm-up + window span the tracker uses.
   B4 Drag-LS   MAP fit of [p, v, beta] (generic drag model, prior on beta from
                the training split), RK4 extrapolation
   B5 Drag-UKF  UKF on [p, v, beta] with polar measurements, RK4 extrapolation
+  B6 Drag-LS-Std as B4 with a standard drag function of Mach (G1 or G7) and an
+               ISA atmosphere; own train prior; table and prior strength selected on val
 
 The beta-prior strength (B4) and the UKF acceleration noise (B5) are selected
 on the validation split. B4 predictions for every split are saved as
@@ -30,7 +32,7 @@ sys.path.insert(0, str(ROOT))
 
 from utils.radar_measurement import ANGLE_STD_DEG, polar_to_cartesian, sensor_for_domain  # noqa: E402
 from utils.ballistic_physics import (  # noqa: E402
-    DT, drag_predict, drag_window_trajectory, fit_drag_window, integrate, polynomial_predict, ukf_drag_track,
+    DT, drag_predict, drag_scale, drag_window_trajectory, fit_drag_window, integrate, polynomial_predict, ukf_drag_track,
 )
 from utils.metrics import evaluate  # noqa: E402
 
@@ -51,7 +53,7 @@ def load(data_dir, split):
     }
 
 
-def beta_prior_from_train(train, n=1500, seed=0):
+def beta_prior_from_train(train, n=1500, seed=0, model='const'):
     """Per-trajectory best constant beta on clean training data (window end + 5 s)."""
     rng = np.random.default_rng(seed)
     index = rng.choice(len(train['X']), size=min(n, len(train['X'])), replace=False)
@@ -63,27 +65,30 @@ def beta_prior_from_train(train, n=1500, seed=0):
     target = clean[:, window:window + horizon]
     err = np.empty((len(index), len(grid)))
     for j, beta in enumerate(grid):
-        pred = integrate(state, np.full(len(index), beta), horizon)
+        pred = integrate(state, np.full(len(index), beta), horizon, model=model)
         err[:, j] = np.linalg.norm(pred - target, axis=-1).mean(-1)
-    best = grid[err.argmin(axis=1)]
+    best = grid[err.argmin(axis=1)] * drag_scale(state, model)
     return {'mean': float(best.mean()), 'std': float(best.std()), 'median': float(np.median(best)),
             'p05': float(np.percentile(best, 5)), 'p95': float(np.percentile(best, 95)), 'n': int(len(index))}
 
 
-def run_b4(split, prior, noise, horizon):
-    params = fit_drag_window(split['obs'], (prior['mean'], prior['std'], noise))
-    return drag_predict(params, horizon), params[:, 6]
+def run_b4(split, prior, noise, horizon, model='const'):
+    params = fit_drag_window(split['obs'], (prior['mean'], prior['std'], noise), model=model)
+    return drag_predict(params, horizon, model), params[:, 6]
 
 
-def save_anchors(data_dir, name, split, prior, noise, horizon):
-    """Save forecast, fitted observation window and beta from the same B4 fit."""
-    params = fit_drag_window(split['obs'], (prior['mean'], prior['std'], noise))
-    anchor = drag_predict(params, horizon)
+def save_anchors(data_dir, name, split, prior, noise, horizon, model='const'):
+    """Save forecast, fitted observation window and beta from the same B4 (or B6) fit.
+
+    For a drag table the saved beta is the window-end drag level beta * f(M_end)."""
+    params = fit_drag_window(split['obs'], (prior['mean'], prior['std'], noise), model=model)
+    anchor = drag_predict(params, horizon, model)
+    beta = params[:, 6] if model == 'const' else params[:, 6] * drag_scale(params, model)
     data_dir = Path(data_dir)
     np.save(data_dir / f'anchor_drag_{name}.npy', anchor.astype(np.float32))
     np.save(data_dir / f'anchor_fit_window_{name}.npy',
-            drag_window_trajectory(params, split['obs'].shape[1]).astype(np.float32))
-    np.save(data_dir / f'anchor_beta_{name}.npy', params[:, 6].astype(np.float32))
+            drag_window_trajectory(params, split['obs'].shape[1], model).astype(np.float32))
+    np.save(data_dir / f'anchor_beta_{name}.npy', beta.astype(np.float32))
     print('anchors saved', name, anchor.shape, flush=True)
 
 
@@ -140,7 +145,10 @@ def main():
     parser.add_argument('--prior-dir', help='Training/validation reference directory (default: --data-dir)')
     parser.add_argument('--fast', action='store_true', help='Skip B5 UKF selection and prediction')
     parser.add_argument('--anchors-only', action='store_true', help='Write anchors for available splits only')
+    parser.add_argument('--no-anchors', action='store_true', help='Write baseline predictions only, not the anchor files')
     parser.add_argument('--report', help='Reuse an existing beta prior and B4 selection for --anchors-only')
+    parser.add_argument('--anchor-model', choices=('b4', 'b6'), default='b4',
+                        help='With --anchors-only --report: anchors from B4 or from the selected B6 table')
     args = parser.parse_args()
     prior_dir = args.prior_dir or args.data_dir
     names = [name for name in ('train', 'val', 'test') if (Path(args.data_dir) / f'{name}.pt').exists()]
@@ -148,21 +156,40 @@ def main():
         parser.error('No dataset splits found')
     t0 = time.time()
     report = {'prior_dir': str(Path(prior_dir).resolve())}
+    anchor_model = 'const'
+    if args.anchor_model == 'b6' and not (args.anchors_only and args.report):
+        parser.error('--anchor-model b6 requires --anchors-only --report')
     if args.anchors_only and args.report:
         stored = json.loads(Path(args.report).read_text(encoding='utf-8'))
         prior = stored['beta_prior']
         best_noise = float(stored['selected']['B4_noise'])
+        if args.anchor_model == 'b6':
+            anchor_model = stored['selected']['B6_table']
+            prior = stored['beta_prior_std'][anchor_model]
+            best_noise = float(stored['selected']['B6_noise'])
     else:
-        prior = beta_prior_from_train(load(prior_dir, 'train'))
+        train = load(prior_dir, 'train')
+        prior = beta_prior_from_train(train)
         report['beta_prior'] = prior
         print('beta prior', prior, f'{time.time() - t0:.0f}s', flush=True)
+        if not args.anchors_only:
+            priors_std = {table: beta_prior_from_train(train, model=table) for table in ('g1', 'g7')}
+            report['beta_prior_std'] = priors_std
+            print('beta prior std', priors_std, f'{time.time() - t0:.0f}s', flush=True)
+        del train
         # Select every train-derived setting on the reference validation split.
         val = load(prior_dir, 'val')
         val_true = truth(val, args.horizon)
-        selection = {'B4_noise': {}, 'B5_q_accel': {}}
-        for noise in (0.25, 1.0, 4.0, 16.0):
-            pred, _ = run_b4(val, prior, noise, args.horizon)
-            selection['B4_noise'][noise] = evaluate(pred, val_true, val['valid_len'])['overall']['ade_m']
+        selection = {'B4_noise': {}, 'B5_q_accel': {}, 'B6_noise': {}}
+        for noise in (0.25, 1.0, 4.0, 16.0, 64.0):
+            if noise < 64.0:  # B4 grid unchanged (its anchors feed training); B6 also tries 64
+                pred, _ = run_b4(val, prior, noise, args.horizon)
+                selection['B4_noise'][noise] = evaluate(pred, val_true, val['valid_len'])['overall']['ade_m']
+            if not args.anchors_only:
+                for table, prior_std in priors_std.items():
+                    pred, _ = run_b4(val, prior_std, noise, args.horizon, table)
+                    selection['B6_noise'][(table, noise)] = evaluate(
+                        pred, val_true, val['valid_len'])['overall']['ade_m']
         best_noise = min(selection['B4_noise'], key=selection['B4_noise'].get)
         if not args.fast and not args.anchors_only:
             for q_accel in (0.01, 0.1, 1.0):
@@ -173,12 +200,16 @@ def main():
             best_q, best_walk = min(selection['B5_q_accel'], key=selection['B5_q_accel'].get)
             report['selected'] = {'B5_q_accel': best_q, 'B5_beta_walk': best_walk}
         report.setdefault('selected', {})['B4_noise'] = best_noise
+        if selection['B6_noise']:
+            best_table, best_noise_std = min(selection['B6_noise'], key=selection['B6_noise'].get)
+            report['selected'].update(B6_table=best_table, B6_noise=best_noise_std)
         report['validation_selection'] = {k: {str(a): b for a, b in v.items()} for k, v in selection.items()}
         print('selection', report['selected'], f'{time.time() - t0:.0f}s', flush=True)
         del val, val_true, pred
     if args.anchors_only:
         for name in names:
-            save_anchors(args.data_dir, name, load(args.data_dir, name), prior, best_noise, args.horizon)
+            save_anchors(args.data_dir, name, load(args.data_dir, name), prior, best_noise, args.horizon,
+                         anchor_model)
         return
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -191,6 +222,7 @@ def main():
         'B3_CVg': polynomial_predict(obs, args.horizon, 1, gravity=True),
     }
     preds['B4_DragLS'], beta_test = run_b4(test, prior, best_noise, args.horizon)
+    preds['B6_DragLSStd'], _ = run_b4(test, priors_std[best_table], best_noise_std, args.horizon, best_table)
     if not args.fast:
         preds['B5_DragUKF'] = run_b5(test, prior, best_q, args.horizon, q_beta=(best_walk * prior['std']) ** 2)
     report['test'] = {}
@@ -204,7 +236,7 @@ def main():
     np.save(out / 'valid_len_test.npy', test['valid_len'])
 
     # Drag anchors for physics-anchored residual learning (all splits).
-    for name in names:
+    for name in ([] if args.no_anchors else names):
         save_anchors(args.data_dir, name, test if name == 'test' else load(args.data_dir, name),
                      prior, best_noise, args.horizon)
 
